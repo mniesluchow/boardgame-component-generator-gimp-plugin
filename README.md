@@ -53,6 +53,7 @@ Project config should have following structure:
       "img2": "image",
       "cost": "text",
       "name": "text",
+      "points_background": "bool",
       "points": "text",
       "fluff": "text"
     },
@@ -66,6 +67,8 @@ Project config should have following structure:
       {
         "cost": "10",
         "name": "Sky Tower",
+        "points_background": "true",
+        "points": "7",
         "fluff": "The view above the clouds is awsome"
       }
     ] 

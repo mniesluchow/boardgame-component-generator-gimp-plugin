@@ -72,16 +72,19 @@ static void query (void)
 typedef enum {
   LAYER_TYPE_UNKNOWN = 0,
   LAYER_TYPE_IMAGE = 1,
-  LAYER_TYPE_TEXT = 2
+  LAYER_TYPE_TEXT = 2,
+  LAYER_TYPE_BOOL = 3
 } LayerType;
 
 static const gchar* LAYER_TYPE_STR_UNKNOWN = "unknown";
 static const gchar* LAYER_TYPE_STR_IMAGE = "image";
 static const gchar* LAYER_TYPE_STR_TEXT = "text";
+static const gchar* LAYER_TYPE_STR_BOOL = "bool";
 
 static LayerType layer_type_from_str(const gchar* str) {
   if (0 == g_strcmp0(str, LAYER_TYPE_STR_IMAGE)) return LAYER_TYPE_IMAGE;
   if (0 == g_strcmp0(str, LAYER_TYPE_STR_TEXT)) return LAYER_TYPE_TEXT;
+  if (0 == g_strcmp0(str, LAYER_TYPE_STR_BOOL)) return LAYER_TYPE_BOOL;
   return LAYER_TYPE_UNKNOWN;
 }
 
@@ -89,6 +92,7 @@ static const gchar* str_from_layer_type(LayerType type) {
   switch (type) {
     case LAYER_TYPE_IMAGE: return LAYER_TYPE_STR_IMAGE;
     case LAYER_TYPE_TEXT: return LAYER_TYPE_STR_TEXT;
+    case LAYER_TYPE_BOOL: return LAYER_TYPE_STR_BOOL;
     default: return LAYER_TYPE_STR_UNKNOWN;
   }
 }
@@ -208,8 +212,9 @@ static gboolean generate_components_from_image(gint32 image_ID, ComponentTemplat
     }
     LayerType layer_type = *((LayerType*)value);
     const gchar* layer_type_str = str_from_layer_type(layer_type);
-    if ((gimp_item_is_text_layer(layer_ID) && layer_type != LAYER_TYPE_TEXT) ||
-        (!gimp_item_is_text_layer(layer_ID) && layer_type != LAYER_TYPE_IMAGE)) {
+    if (!((layer_type == LAYER_TYPE_IMAGE && !gimp_item_is_text_layer(layer_ID))
+        || (layer_type == LAYER_TYPE_TEXT && gimp_item_is_text_layer(layer_ID))
+        || layer_type == LAYER_TYPE_BOOL)) {
       printf("Layer %s type missmatch\n", (gchar*)key);
       printf("  Config: %s\n", layer_type_str);
       printf("  Image: ");
