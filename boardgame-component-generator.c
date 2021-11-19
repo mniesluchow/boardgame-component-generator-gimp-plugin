@@ -262,8 +262,21 @@ static gboolean generate_from_xfc(gchar* xcfs_dir, gchar* assets_dir, gchar* out
     printf("Input file %s not found\n", xfc_path);
     ret = FALSE;
   } else {
-    ret = generate_components_from_image(image_ID, ct, assets_dir, out_dir);
-    if (!ret) printf("Failed to generate components from %s image\n", xfc_path);
+    gchar* components_out_dir = g_build_filename(out_dir, name, NULL);
+    GFile* components_out_dir_gfile = g_file_new_for_path(components_out_dir);
+    GError *error = NULL;
+
+    ret = g_file_make_directory_with_parents(components_out_dir_gfile, NULL, &error);
+    if (error) {
+      printf("Unable to make direcotry %s: %s\n", components_out_dir, error->message);
+      g_error_free(error);
+    } else {
+      ret = generate_components_from_image(image_ID, ct, assets_dir, components_out_dir);
+      if (!ret) printf("Failed to generate components from %s image\n", xfc_path);
+    }
+
+    g_object_unref(components_out_dir_gfile);
+    g_free(components_out_dir);
   }
 
   gimp_image_delete(image_ID);
