@@ -69,6 +69,8 @@ static void query (void)
                              "<Image>/File/Export");
 }
 
+static const gchar* const OUT_EXTENSION = "png";
+
 typedef enum {
   LAYER_TYPE_UNKNOWN = 0,
   LAYER_TYPE_IMAGE = 1,
@@ -290,12 +292,52 @@ static GHashTable* parse_json_config(const gchar* config_path) {
   return xcfs;
 }
 
-// TODO: This just prints layers for now
-static gboolean generate_components_from_image(gint32 image_ID, ComponentTemplate* ct, gchar* assets_dir, gchar* out_dir) {
+void print_layer_mismatch(gint32 layer_ID, const gchar* name, LayerType layer_type) {
+  printf("Layer %s type missmatch\n", name);
+  printf("  Config: %s\n", str_from_layer_type(layer_type));
+  printf("  Image: ");
+  if (gimp_item_is_text_layer(layer_ID)) {
+    printf("text\n");
+  } else {
+    printf("image\n");
+  }
+}
+
+gint32 insert_image_layer(gint32 image_ID, gint32 layer_ID, LayerData* layer_data, gchar* assets_dir) {
+  gchar* asset_file = g_build_filename(assets_dir, layer_data->image_path, NULL);
+  gint32 new_layer_ID = gimp_file_load_layer(GIMP_RUN_NONINTERACTIVE, image_ID, asset_file);
+  if (new_layer_ID == -1) {
+    printf("Unable to load %s as layer\n", asset_file);
+    g_free(asset_file);
+    return -1;
+  }
+  g_free(asset_file);
+  gint32 parent_ID = gimp_item_get_parent(layer_ID);
+  gint layer_position = gimp_image_get_item_position(image_ID, layer_ID);
+  if (!gimp_image_insert_layer(image_ID, new_layer_ID, parent_ID, layer_position)) {
+    printf("Unable to add layer to image\n");
+    gimp_item_delete(new_layer_ID);
+    return -1;
+  }
+  if (!gimp_layer_scale(new_layer_ID, gimp_drawable_width(layer_ID), gimp_drawable_height(layer_ID), FALSE)) {
+    printf("Unable to scale layer\n");
+    gimp_image_remove_layer(image_ID, new_layer_ID);
+    return -1;
+  }
+  gint offset_x, offset_y;
+  gimp_drawable_offsets(layer_ID, &offset_x, &offset_y);
+  if (!gimp_layer_set_offsets(new_layer_ID, offset_x, offset_y)) {
+    printf("Unable to set offset of layer\n");
+    gimp_image_remove_layer(image_ID, new_layer_ID);
+    return -1;
+  }
+  return new_layer_ID;
+}
+
+static gboolean prepare_config_layers(gint32 image_ID, GHashTable* layers) {
   GHashTableIter iter;
   gpointer key, value;
-  g_hash_table_iter_init(&iter, ct->layers);
-  printf("Layers:\n");
+  g_hash_table_iter_init(&iter, layers);
   while (g_hash_table_iter_next(&iter, &key, &value)) {
     gint32 layer_ID = gimp_image_get_layer_by_name(image_ID, key);
     if (layer_ID == -1) {
@@ -303,50 +345,78 @@ static gboolean generate_components_from_image(gint32 image_ID, ComponentTemplat
       return FALSE;
     }
     LayerType layer_type = *((LayerType*)value);
-    const gchar* layer_type_str = str_from_layer_type(layer_type);
     if (!((layer_type == LAYER_TYPE_IMAGE && !gimp_item_is_text_layer(layer_ID))
         || (layer_type == LAYER_TYPE_TEXT && gimp_item_is_text_layer(layer_ID))
         || layer_type == LAYER_TYPE_BOOL)) {
-      printf("Layer %s type missmatch\n", (gchar*)key);
-      printf("  Config: %s\n", layer_type_str);
-      printf("  Image: ");
-      if (gimp_item_is_text_layer(layer_ID)) {
-        printf("text\n");
-      } else {
-        printf("image\n");
-      }
+      print_layer_mismatch(layer_ID, (gchar*)key, layer_type);
       return FALSE;
     }
+    gimp_item_set_visible(layer_ID, FALSE);
+  }
+  return TRUE;
+}
 
-    printf("- %s\n", (gchar*)key);
-    printf("  type: %s\n", layer_type_str);
-    printf("  size: [%d, %d]\n", gimp_drawable_width(layer_ID), gimp_drawable_height(layer_ID));
+static gboolean generate_component(int i, gint32 image_ID, GHashTable* component_layers, gchar* assets_dir, gchar* out_dir) {
+  GHashTableIter iter;
+  gpointer key, value;
+  gint32 new_image_ID = gimp_image_duplicate(image_ID);
+  g_hash_table_iter_init(&iter, component_layers);
+  while (g_hash_table_iter_next(&iter, &key, &value)) {
+    gchar* layer_name = (gchar*)key;
+    LayerData* layer_data = (LayerData*)value;
+    gint32 layer_ID = gimp_image_get_layer_by_name(new_image_ID, key);
+    gint32 new_layer_ID;
+    switch (layer_data->type) {
+      case LAYER_TYPE_IMAGE:
+        new_layer_ID = insert_image_layer(new_image_ID, layer_ID, layer_data, assets_dir);
+        if (new_layer_ID == -1) {
+          gimp_image_delete(new_image_ID);
+          return FALSE;
+        }
+        break;
+      case LAYER_TYPE_TEXT:
+        if (!gimp_text_layer_set_text(layer_ID, layer_data->text)) {
+          gimp_image_delete(new_image_ID);
+          printf("Failed to set following text to layer: %s\n", layer_data->text);
+          return FALSE; 
+        }
+        new_layer_ID = layer_ID;
+        break;
+      case LAYER_TYPE_BOOL:
+        new_layer_ID = layer_ID;
+        break;
+      default:
+        gimp_image_delete(new_image_ID);
+        printf("Invalid layer type. Something went wrong\n");
+        return FALSE;
+    }
+    gimp_item_set_visible(new_layer_ID, TRUE);
   }
 
+  gint32 final_layer = gimp_image_flatten(new_image_ID);
+  gchar* filename = g_strdup_printf("%d.%s", i, OUT_EXTENSION);
+  gchar* out_file = g_build_filename(out_dir, filename, NULL);
+  gboolean ret = gimp_file_save(
+      GIMP_RUN_NONINTERACTIVE,
+      new_image_ID,
+      final_layer,
+      out_file,
+      filename);
+  if (!ret) {
+    printf("Failed to save image to %s\n", out_file);
+  }
+  g_free(filename);
+  g_free(out_file);
+  gimp_image_delete(new_image_ID);
+  return ret;
+}
+
+static gboolean generate_components(gint32 image_ID, GPtrArray* components_layers, gchar* assets_dir, gchar* out_dir) {
   int i;
-  printf("Data:\n");
-  for (i = 0; i < ct->data->len; ++i) {
-    printf("data[%d]:\n", i);
-    GHashTable *hash_table = (GHashTable*)(g_ptr_array_index(ct->data, i));
-    GHashTableIter iter;
-    gpointer key, value;
-    g_hash_table_iter_init(&iter, hash_table);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-      gchar* layer_name = (gchar*)key;
-      LayerData* layer_data = (LayerData*)value;
-      printf("- %s", layer_name);
-      switch (layer_data->type) {
-        case LAYER_TYPE_IMAGE:
-          printf(": %s\n", layer_data->image_path);
-          break;
-        case LAYER_TYPE_TEXT:
-          printf(": %s\n", layer_data->text);
-          break;
-        case LAYER_TYPE_BOOL:
-          printf("\n");
-          break;
-        default: return FALSE;
-      }
+  for (i = 0; i < components_layers->len; ++i) {
+    GHashTable *component_layers = (GHashTable*)(g_ptr_array_index(components_layers, i));
+    if (!generate_component(i, image_ID, component_layers, assets_dir, out_dir)) {
+      return FALSE;
     }
   }
 
@@ -371,34 +441,56 @@ static gboolean save_out_image(gint32 image_ID, gchar* out_file) {
   return ret;
 }
 
+static gchar* create_components_out_dir(gchar* out_dir, gchar* name) {
+  gchar* components_out_dir = g_build_filename(out_dir, name, NULL);
+  GFile* components_out_dir_gfile = g_file_new_for_path(components_out_dir);
+  GError *error = NULL;
+
+  g_file_make_directory_with_parents(components_out_dir_gfile, NULL, &error);
+  if (error) {
+    if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_EXISTS)) {
+      printf("Unable to make direcotry %s: %s\n", components_out_dir, error->message);
+      g_error_free(error);
+      g_object_unref(components_out_dir_gfile);
+      g_free(components_out_dir);
+      return NULL;
+    }
+    g_error_free(error);
+  }
+  g_object_unref(components_out_dir_gfile);
+  return components_out_dir;
+}
+
 static gboolean generate_from_xfc(gchar* xcfs_dir, gchar* assets_dir, gchar* out_dir, gchar* name, ComponentTemplate* ct) {
   gchar* xfc_filename = g_strconcat(name, ".xcf", NULL);
   gchar* xfc_path = g_build_filename(xcfs_dir, xfc_filename, NULL);
-  gboolean ret;
 
   gint32 image_ID = gimp_file_load(GIMP_RUN_NONINTERACTIVE, xfc_path, xfc_path);
   if (image_ID == -1) {
     printf("Input file %s not found\n", xfc_path);
-    ret = FALSE;
-  } else {
-    gchar* components_out_dir = g_build_filename(out_dir, name, NULL);
-    GFile* components_out_dir_gfile = g_file_new_for_path(components_out_dir);
-    GError *error = NULL;
-
-    g_file_make_directory_with_parents(components_out_dir_gfile, NULL, &error);
-    ret = !error || g_error_matches(error, G_IO_ERROR, G_IO_ERROR_EXISTS);
-    if (!ret) {
-      printf("Unable to make direcotry %s: %s\n", components_out_dir, error->message);
-    } else {
-      ret = generate_components_from_image(image_ID, ct, assets_dir, components_out_dir);
-      if (!ret) printf("Failed to generate components from %s image\n", xfc_path);
-    }
-
-    if(error) g_error_free(error);
-    g_object_unref(components_out_dir_gfile);
-    g_free(components_out_dir);
+    g_free(xfc_path);
+    g_free(xfc_filename);
+    return FALSE;
   }
 
+  if (!prepare_config_layers(image_ID, ct->layers)) {
+    gimp_image_delete(image_ID);
+    g_free(xfc_path);
+    g_free(xfc_filename);
+    return FALSE;
+  }
+
+  gchar* components_out_dir = create_components_out_dir(out_dir, name);
+  if (!components_out_dir) {
+    gimp_image_delete(image_ID);
+    g_free(xfc_path);
+    g_free(xfc_filename);
+    return FALSE;
+  }
+
+  gboolean ret = generate_components(image_ID, ct->data, assets_dir, components_out_dir);
+
+  g_free(components_out_dir);
   gimp_image_delete(image_ID);
   g_free(xfc_path);
   g_free(xfc_filename);
