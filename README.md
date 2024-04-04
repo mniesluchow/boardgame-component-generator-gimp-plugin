@@ -8,17 +8,17 @@ Project directory should have following structure:
 
 ```
 project
-│ config.json
-└─xcfs
-│ │ some_component.xcf
-│ │ another_component.xcf
-└─assets
-│ └─some_asset_dir
-│ │ asset_1.png
-│ │ asset_2.png
-│ └─another_asset_dir
-│ │ asset_1.png
-│ │ asset_2.png
+├─config.json
+├─xcfs
+│ ├─some_component.xcf
+│ └─another_component.xcf
+├─assets
+│ ├─some_asset_dir
+│ │ ├─asset_1.png
+│ │ └─asset_2.png
+│ ├─another_asset_dir
+│ │ ├─asset_1.png
+│ │ └─asset_2.png
 | | ...
 | ...
 ```
