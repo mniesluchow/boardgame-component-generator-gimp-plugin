@@ -43,7 +43,7 @@ Project config should have following structure:
       {
         "type icon": "some_asset_dir/asset_1.png",
         "title": "Some component title text",
-        "main image": "some_asset_dir/asset_2.png",
+        "main image": "some_asset_dir/asset_2.png"
       }
     ] 
   },
