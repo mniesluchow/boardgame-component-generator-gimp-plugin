@@ -12,6 +12,11 @@ if [ $# -lt 1 ] ; then
   echo "Usage: ./run.sh /path/to/project/dir"
 fi
 
+if ! command -v gimptool-2.0 >/dev/null 2>&1 ; then
+  echo "Installing gimptool-2.0"
+  sudo apt install -y libgimp2.0-dev
+fi
+
 gimptool-2.0 --install "$SCRIPT_DIR/boardgame-component-generator.c"
 gimp -i -b "(boardgame-component-generator RUN-NONINTERACTIVE 0 0 \"$1\")" -b '(gimp-quit 0)'
 gimptool-2.0 --uninstall-bin boardgame-component-generator
