@@ -66,7 +66,10 @@ Project config should have following structure:
       },
       {
         "cost": "10",
-        "name": "Sky Tower",
+        "name": {
+          "value": "Sky\nTower",
+          "vcenter": 1,
+        },
         "points_background": "true",
         "points": "7",
         "fluff": "The view above the clouds is awsome"

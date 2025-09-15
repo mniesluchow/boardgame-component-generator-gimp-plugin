@@ -103,7 +103,7 @@ typedef struct {
   LayerType type;
   union {
     gchar* image_path;
-    gchar* text;
+    struct text { gchar* value; int vcenter; } text;
   };
 } LayerData;
 
@@ -114,10 +114,11 @@ LayerData* new_layer_data_image(gchar* image_path) {
   return ld;
 }
 
-LayerData* new_layer_data_text(gchar* text) {
+LayerData* new_layer_data_text(gchar* value, int vcenter) {
   LayerData* ld = malloc(sizeof(LayerData));
   ld->type = LAYER_TYPE_TEXT;
-  ld->text = text;
+  ld->text.value = value;
+  ld->text.vcenter = vcenter;
   return ld;
 }
 
@@ -134,7 +135,7 @@ void del_layer_data(LayerData* ld) {
       g_free(ld->image_path);
       break;
     case LAYER_TYPE_TEXT:
-      g_free(ld->text);
+      g_free(ld->text.value);
       break;
   }
   free(ld);
@@ -223,15 +224,44 @@ static gpointer new_layer_from_json(JsonReader *reader, gchar* key, void* user_d
 
 static gpointer new_layer_data_from_json(JsonReader *reader, gchar* key, void* user_data) {
   gpointer value = g_hash_table_lookup((GHashTable*)user_data, key);
-  if (!value || !json_reader_is_value(reader)) {
+  if (!value) {
     return NULL;
   }
 
   LayerType layer_type = *((LayerType*)value);
-  const gchar* data_value = json_reader_get_string_value(reader);
   switch (layer_type) {
-    case LAYER_TYPE_IMAGE: return new_layer_data_image(g_strdup(data_value));
-    case LAYER_TYPE_TEXT: return new_layer_data_text(g_strdup(data_value));
+    case LAYER_TYPE_IMAGE: {
+      if (!json_reader_is_value(reader)) return NULL;
+      const gchar* data_value = json_reader_get_string_value(reader);
+      return new_layer_data_image(g_strdup(data_value));
+    }
+    case LAYER_TYPE_TEXT: {
+      if (json_reader_is_value(reader)) {
+        const gchar* data_value = json_reader_get_string_value(reader);
+        return new_layer_data_text(g_strdup(data_value), 0);
+      } else if (json_reader_is_object(reader)) {
+        gchar* text_value_dup = NULL;
+        int center_val = 0;
+
+        if (!json_reader_read_member(reader, "value")) return NULL;
+        if (!json_reader_is_value(reader)) { json_reader_end_member(reader); return NULL; }
+        const gchar* text_value = json_reader_get_string_value(reader);
+        text_value_dup = g_strdup(text_value);
+        json_reader_end_member(reader);
+
+        if (json_reader_read_member(reader, "vcenter")) {
+          if (json_reader_is_value(reader)) {
+            /* accept boolean or int; convert to int */
+            center_val = json_reader_get_boolean_value(reader) ? 1 : json_reader_get_int_value(reader);
+          }
+          json_reader_end_member(reader);
+        }
+
+        if (!text_value_dup) return NULL;
+        return new_layer_data_text(text_value_dup, center_val);
+      }
+      return NULL;
+    }
     case LAYER_TYPE_BOOL: return new_layer_data_bool();
   }
   return NULL;
@@ -356,6 +386,36 @@ static gboolean prepare_config_layers(gint32 image_ID, GHashTable* layers) {
   return TRUE;
 }
 
+static gboolean fit_text_in_bounds(gint32 layer_ID, gint width, gint height, const gchar* text) {
+  // Set text
+  if (!gimp_text_layer_set_text(layer_ID, text)) {
+    gimp_image_delete(new_image_ID);
+    printf("Failed to set following text to layer: %s\n", text);
+    return FALSE; 
+  }
+
+  gdouble font_size = gimp_text_layer_get_font_size(layer_ID);
+  GimpUnit font_unit = gimp_text_layer_get_font_size_unit(layer_ID);
+  gint text_h = gimp_drawable_height(layer_ID);
+
+  while (text_h > height) {
+    // Reduce font size
+    font_size -= 1.0;
+    if (font_size < 1.0) {
+      // No lower font size possible
+      printf("Text does not fit in bounding box and cannot reduce font size further: %s\n", text);
+      return FALSE;
+    }
+    gimp_text_layer_set_font_size(layer_ID, font_size, font_unit);
+    // Re-set text to trigger re-layout
+    gimp_text_layer_set_text(layer_ID, text);
+    // Recalculate text size
+    text_h = gimp_drawable_height(layer_ID);
+  }
+
+  return TRUE;
+}
+
 static gboolean generate_component(int i, gint32 image_ID, GHashTable* component_layers, gchar* assets_dir, gchar* out_dir) {
   GHashTableIter iter;
   gpointer key, value;
@@ -374,14 +434,46 @@ static gboolean generate_component(int i, gint32 image_ID, GHashTable* component
           return FALSE;
         }
         break;
-      case LAYER_TYPE_TEXT:
-        if (!gimp_text_layer_set_text(layer_ID, layer_data->text)) {
-          gimp_image_delete(new_image_ID);
-          printf("Failed to set following text to layer: %s\n", layer_data->text);
-          return FALSE; 
+      case LAYER_TYPE_TEXT: {
+        const gint width = gimp_drawable_width(layer_ID);
+        const gint height = gimp_drawable_height(layer_ID);
+
+        if (!layer_data->text.vcenter) {
+          // No "vcenter" param, do as before
+          // Fit text within bounds by reducing font size if needed
+          if (!fit_text_in_bounds(layer_ID, width, height, layer_data->text.value)) {
+            gimp_image_delete(new_image_ID);
+            return FALSE;
+          }
+        } else {
+          // "vcenter" param present: make text box dynamic and center it vertically
+          gint x, y;
+          gimp_drawable_offsets(layer_ID, &x, &y);
+
+          // Fit text within bounds by reducing font size if needed
+          if (!fit_text_in_bounds(layer_ID, width, height, layer_data->text.value)) {
+            gimp_image_delete(new_image_ID);
+            return FALSE;
+          }
+
+          // Make text box dynamic (relative)
+          gimp_text_layer_set_box_mode(layer_ID, GIMP_TEXT_BOX_DYNAMIC);
+
+          // Ensure max width
+          gint text_h = gimp_drawable_height(layer_ID);
+          if (text_h > height) {
+            text_h = height
+          }
+
+          gimp_text_layer_resize(layer_ID, width, text_h);
+
+          // Center text within the original box
+          gint new_y = y + (height - text_h) / 2;
+          gimp_layer_set_offsets(layer_ID, x, new_y);
         }
         new_layer_ID = layer_ID;
         break;
+      }
       case LAYER_TYPE_BOOL:
         new_layer_ID = layer_ID;
         break;
