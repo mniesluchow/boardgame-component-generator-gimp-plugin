@@ -4,6 +4,7 @@
 #include <glib.h>
 #include <json-glib/json-glib.h>
 #include <json-glib/json-gobject.h>
+#include <math.h>
 
 #define PLUG_IN_PROC_NAME "boardgame-component-generator"
 #define PLUG_IN_BINARY "boardgame-component-generator-bin"
@@ -101,30 +102,37 @@ static const gchar* str_from_layer_type(LayerType type) {
 
 typedef struct {
   LayerType type;
+  gdouble rotate;
   union {
     gchar* image_path;
-    struct text { gchar* value; int vcenter; } text;
+    struct text {
+      gchar* value;
+      int vcenter;
+    } text;
   };
 } LayerData;
 
-LayerData* new_layer_data_image(gchar* image_path) {
+LayerData* new_layer_data_image(gchar* image_path, gdouble rotate) {
   LayerData* ld = malloc(sizeof(LayerData));
   ld->type = LAYER_TYPE_IMAGE;
+  ld->rotate = rotate;
   ld->image_path = image_path;
   return ld;
 }
 
-LayerData* new_layer_data_text(gchar* value, int vcenter) {
+LayerData* new_layer_data_text(gchar* value, int vcenter, gdouble rotate) {
   LayerData* ld = malloc(sizeof(LayerData));
   ld->type = LAYER_TYPE_TEXT;
+  ld->rotate = rotate;
   ld->text.value = value;
   ld->text.vcenter = vcenter;
   return ld;
 }
 
-LayerData* new_layer_data_bool() {
+LayerData* new_layer_data_bool(gdouble rotate) {
   LayerData* ld = malloc(sizeof(LayerData));
   ld->type = LAYER_TYPE_BOOL;
+  ld->rotate = rotate;
   return ld;
 }
 
@@ -165,14 +173,19 @@ typedef gpointer (*NewHashTableElementCallback)(JsonReader *reader, gchar* key, 
 static GHashTable* new_hashtable_from_json_object(JsonReader *reader, NewHashTableElementCallback callback, GDestroyNotify free_func, void* user_data) {
   if (!json_reader_is_object(reader)) return NULL;
 
-  gint elements_len = json_reader_count_members(reader);
   gchar** members_list = json_reader_list_members(reader);
   GHashTable* hash_table = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_func);
   for (gchar** m = members_list; *m != NULL; ++m) {
-    if (!json_reader_read_member(reader, *m)) return NULL;
+    if (!json_reader_read_member(reader, *m)) {
+      json_reader_end_member(reader);
+      printf("%s is not a member", *m);
+      return NULL;
+    }
 
     gpointer data = (*callback)(reader, *m, user_data);
     if (!data) {
+      printf("Failed to get data from %s\n", *m);
+      json_reader_end_member(reader);
       g_hash_table_destroy(hash_table);
       g_strfreev(members_list);
       return NULL;
@@ -210,10 +223,12 @@ static GPtrArray* new_ptr_array_from_json_array(JsonReader *reader, NewElementCa
 
 static gpointer new_layer_from_json(JsonReader *reader, gchar* key, void* user_data) {
   if (!json_reader_is_value(reader)) {
+    printf("Not a value under key %s\n", key);
     return NULL;
   }
   LayerType type = layer_type_from_str(json_reader_get_string_value(reader));
   if (type == LAYER_TYPE_UNKNOWN) {
+    printf("Layer type unknown: %s\n", json_reader_get_string_value(reader));
     return NULL;
   }
 
@@ -222,49 +237,100 @@ static gpointer new_layer_from_json(JsonReader *reader, gchar* key, void* user_d
   return layer_type;
 }
 
+static gchar* read_value_member_from_json(JsonReader *reader, gchar* key) {
+  if (!json_reader_read_member(reader, "value")) {
+    printf("value not a member of %s\n", key);
+    json_reader_end_member(reader);
+    return NULL;
+  }
+  if (!json_reader_is_value(reader)) {
+    printf("%s value is not a value\n", key);
+    json_reader_end_member(reader);
+    return NULL;
+  }
+  const gchar* value = json_reader_get_string_value(reader);
+  gchar* value_dup = g_strdup(value);
+  json_reader_end_member(reader);
+  if (!value_dup) {
+    printf("Failed to duplicate text value for key %s\n", key);
+    return NULL;
+  }
+  return value_dup;
+}
+
 static gpointer new_layer_data_from_json(JsonReader *reader, gchar* key, void* user_data) {
   gpointer value = g_hash_table_lookup((GHashTable*)user_data, key);
   if (!value) {
+    printf("Layer data not found for key %s\n", key);
     return NULL;
+  }
+
+  gdouble rotate = 0.0;
+  if (json_reader_is_object(reader)) {
+    if (json_reader_read_member(reader, "rotate")) {
+      if (!json_reader_is_value(reader)) {
+        printf("%s rotate is not a value\n", key);
+        json_reader_end_member(reader);
+        return NULL;
+      }
+      rotate = json_reader_get_double_value(reader);
+    }
+    json_reader_end_member(reader);
   }
 
   LayerType layer_type = *((LayerType*)value);
   switch (layer_type) {
     case LAYER_TYPE_IMAGE: {
-      if (!json_reader_is_value(reader)) return NULL;
-      const gchar* data_value = json_reader_get_string_value(reader);
-      return new_layer_data_image(g_strdup(data_value));
+      if (json_reader_is_value(reader)) {
+        const gchar* data_value = json_reader_get_string_value(reader);
+        return new_layer_data_image(g_strdup(data_value), 0.0);
+      } else if (json_reader_is_object(reader)) {
+        gchar* value_str = read_value_member_from_json(reader, key);
+        if (!value_str) {
+          printf("Failed to read image value for key %s\n", key);
+          return NULL;
+        }
+        return new_layer_data_image(value_str, rotate);
+      } else {
+        printf("Layer data is not a value for key %s\n", key);
+        return NULL;
+      }
     }
     case LAYER_TYPE_TEXT: {
       if (json_reader_is_value(reader)) {
         const gchar* data_value = json_reader_get_string_value(reader);
-        return new_layer_data_text(g_strdup(data_value), 0);
+        return new_layer_data_text(g_strdup(data_value), 0, 0.0);
       } else if (json_reader_is_object(reader)) {
-        gchar* text_value_dup = NULL;
-        int center_val = 0;
-
-        if (!json_reader_read_member(reader, "value")) return NULL;
-        if (!json_reader_is_value(reader)) { json_reader_end_member(reader); return NULL; }
-        const gchar* text_value = json_reader_get_string_value(reader);
-        text_value_dup = g_strdup(text_value);
-        json_reader_end_member(reader);
-
-        if (json_reader_read_member(reader, "vcenter")) {
-          if (json_reader_is_value(reader)) {
-            /* accept boolean or int; convert to int */
-            center_val = json_reader_get_boolean_value(reader) ? 1 : json_reader_get_int_value(reader);
-          }
-          json_reader_end_member(reader);
+        int center = 0;
+        gchar* value_str = read_value_member_from_json(reader, key);
+        if (!value_str) {
+          printf("Failed to read text value for key %s\n", key);
+          return NULL;
         }
 
-        if (!text_value_dup) return NULL;
-        return new_layer_data_text(text_value_dup, center_val);
+        if (json_reader_read_member(reader, "vcenter")) {
+          if (!json_reader_is_value(reader)) {
+            printf("%s vcenter is not a value\n", key);
+            json_reader_end_member(reader);
+            g_free(value_str);
+            return NULL;
+          }
+          /* accept boolean or int; convert to int */
+          center = json_reader_get_boolean_value(reader) ? 1 : json_reader_get_int_value(reader);
+        }
+        json_reader_end_member(reader);
+
+        return new_layer_data_text(value_str, center, rotate);
       }
+
+      printf("Layer data is neither a value nor an object for key %s\n", key);
       return NULL;
     }
-    case LAYER_TYPE_BOOL: return new_layer_data_bool();
+    case LAYER_TYPE_BOOL: return new_layer_data_bool(rotate);
+    default:
+      printf("Invalid layer type for key %s\n", key);
+      return NULL;
   }
-  return NULL;
 }
 
 static gpointer new_data_from_json(JsonReader *reader, void* user_data) {
@@ -272,25 +338,32 @@ static gpointer new_data_from_json(JsonReader *reader, void* user_data) {
 }
 
 static gpointer new_xcf_from_json(JsonReader *reader, gchar* key, void* user_data) {
-  if (!json_reader_is_object(reader) ||
-      !json_reader_read_member(reader, "layers")) {
-    return FALSE;
+  if (!json_reader_is_object(reader)) {
+    printf("Not an object under key %s\n", key);
+    return NULL;
+  }
+  if (!json_reader_read_member(reader, "layers")) {
+    printf("layers not a member of %s\n", key);
+    return NULL;
   }
   GHashTable* layers = new_hashtable_from_json_object(reader, &new_layer_from_json, g_free, NULL);
   if (!layers) {
-    return FALSE;
+    printf("Failed to read layers from %s object\n", key);
+    return NULL;
   }
   json_reader_end_member(reader);
 
   if (!json_reader_read_member(reader, "data")) {
+    printf("data not a member of %s\n", key);
     g_hash_table_destroy(layers);
-    return FALSE;
+    return NULL;
   }
 
   GPtrArray* data = new_ptr_array_from_json_array(reader, &new_data_from_json, (GDestroyNotify)&g_hash_table_destroy, layers);
   if (!data) {
+    printf("Failed to read data from %s object\n", key);
     g_hash_table_destroy(layers);
-    return FALSE;
+    return NULL;
   }
 
   json_reader_end_member(reader);
@@ -389,13 +462,16 @@ static gboolean prepare_config_layers(gint32 image_ID, GHashTable* layers) {
 static gboolean fit_text_in_bounds(gint32 layer_ID, gint width, gint height, const gchar* text) {
   // Set text
   if (!gimp_text_layer_set_text(layer_ID, text)) {
-    gimp_image_delete(new_image_ID);
     printf("Failed to set following text to layer: %s\n", text);
     return FALSE; 
   }
 
-  gdouble font_size = gimp_text_layer_get_font_size(layer_ID);
-  GimpUnit font_unit = gimp_text_layer_get_font_size_unit(layer_ID);
+  if (strlen(text) == 0) {
+    return TRUE;
+  }
+
+  GimpUnit font_unit;
+  gdouble font_size = gimp_text_layer_get_font_size(layer_ID, &font_unit);
   gint text_h = gimp_drawable_height(layer_ID);
 
   while (text_h > height) {
@@ -416,6 +492,106 @@ static gboolean fit_text_in_bounds(gint32 layer_ID, gint width, gint height, con
   return TRUE;
 }
 
+static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcenter) {
+  if (!gimp_item_is_text_layer(layer_ID)) {
+    printf("Layer is not a text layer\n");
+    return FALSE;
+  }
+
+  if (strlen(text) == 0) {
+    return TRUE;
+  }
+
+  // Get original text layer properties
+  gint32 original_image_ID = gimp_item_get_image(layer_ID);
+  gint text_width = gimp_drawable_width(layer_ID);
+  gint text_height = gimp_drawable_height(layer_ID);
+  
+  GimpUnit font_unit;
+  gdouble font_size = gimp_text_layer_get_font_size(layer_ID, &font_unit);
+  gchar* font_name = gimp_text_layer_get_font(layer_ID);
+  GimpRGB text_color;
+  gimp_text_layer_get_color(layer_ID, &text_color);
+  
+  // Create new image with text layer width and twice the height
+  gint32 temp_image_ID = gimp_image_new(text_width, text_height * 2, GIMP_RGB);
+  
+  // Create text layer that takes whole image size
+  gint32 temp_text_layer_ID = gimp_text_layer_new(temp_image_ID, text, font_name, font_size, font_unit);
+  if (temp_text_layer_ID == -1) {
+    printf("Failed to create temporary text layer\n");
+    gimp_image_delete(temp_image_ID);
+    g_free(font_name);
+    return FALSE;
+  }
+  
+  gimp_image_insert_layer(temp_image_ID, temp_text_layer_ID, -1, 0);
+  gimp_text_layer_set_color(temp_text_layer_ID, &text_color);
+  
+  // Resize text layer to fill the whole image
+  gimp_text_layer_resize(temp_text_layer_ID, text_width, text_height * 2);
+  
+  gdouble current_font_size = font_size;
+  gboolean text_fits = FALSE;
+
+  gint y1, y2;
+
+  // Check if visible text exceeds half image size and adjust font size
+  while (!text_fits && current_font_size >= 1.0) {
+    // Set current font size
+    gimp_text_layer_set_font_size(temp_text_layer_ID, current_font_size, font_unit);
+    gimp_text_layer_set_text(temp_text_layer_ID, text);
+    
+    // Create alpha selection to find text bounds
+    gimp_image_select_item(temp_image_ID, GIMP_CHANNEL_OP_REPLACE, temp_text_layer_ID);
+    
+    // Check if selection exists (text is visible)
+    gint x1, x2;
+    gboolean has_selection;
+    gimp_selection_bounds(temp_image_ID, &has_selection, &x1, &y1, &x2, &y2);
+
+    if (!has_selection) {
+      // No visible text, font size might be too small or text is empty
+      text_fits = TRUE;
+    } else {
+      // Check if the lowest point of selection (y2) exceeds half image height
+      gint half_height = text_height; // Since image height is 2 * text_height, half is text_height
+      if (y2 <= half_height) {
+        text_fits = TRUE;
+      } else {
+        // Text exceeds half height, reduce font size
+        current_font_size -= 1.0;
+      }
+    }
+    
+    // Clear selection
+    gimp_selection_none(temp_image_ID);
+  }
+
+  // Remove temporary image
+  gimp_image_delete(temp_image_ID);
+  g_free(font_name);
+  
+  if (current_font_size < 1.0) {
+    printf("Could not fit text within bounds: %s\n", text);
+    return FALSE;
+  }
+
+  // Set the found font size to the original text layer
+  gimp_text_layer_set_font_size(layer_ID, current_font_size, font_unit);
+  gimp_text_layer_set_text(layer_ID, text);
+
+  if (vcenter) {
+    gint x, y;
+    gimp_drawable_offsets(layer_ID, &x, &y);
+    const gint height_space = (text_height - (y2 - y1)) / 2;
+    gint new_y = y - y1 + height_space;
+    gimp_layer_set_offsets(layer_ID, x, new_y);
+  }
+
+  return TRUE;
+}
+
 static gboolean generate_component(int i, gint32 image_ID, GHashTable* component_layers, gchar* assets_dir, gchar* out_dir) {
   GHashTableIter iter;
   gpointer key, value;
@@ -426,6 +602,7 @@ static gboolean generate_component(int i, gint32 image_ID, GHashTable* component
     LayerData* layer_data = (LayerData*)value;
     gint32 layer_ID = gimp_image_get_layer_by_name(new_image_ID, key);
     gint32 new_layer_ID;
+    printf("Processing layer %s of type %s\n", layer_name, str_from_layer_type(layer_data->type));
     switch (layer_data->type) {
       case LAYER_TYPE_IMAGE:
         new_layer_ID = insert_image_layer(new_image_ID, layer_ID, layer_data, assets_dir);
@@ -433,56 +610,29 @@ static gboolean generate_component(int i, gint32 image_ID, GHashTable* component
           gimp_image_delete(new_image_ID);
           return FALSE;
         }
+        gimp_item_set_visible(new_layer_ID, TRUE);
         break;
-      case LAYER_TYPE_TEXT: {
-        const gint width = gimp_drawable_width(layer_ID);
-        const gint height = gimp_drawable_height(layer_ID);
-
-        if (!layer_data->text.vcenter) {
-          // No "vcenter" param, do as before
-          // Fit text within bounds by reducing font size if needed
-          if (!fit_text_in_bounds(layer_ID, width, height, layer_data->text.value)) {
+      case LAYER_TYPE_TEXT:
+        gimp_item_set_visible(layer_ID, TRUE);
+        if (!fit_text_in_layer(layer_ID, layer_data->text.value, layer_data->text.vcenter)) {
+            printf("Couldn't fit text in layer: %s\n", layer_data->text.value);
             gimp_image_delete(new_image_ID);
             return FALSE;
-          }
-        } else {
-          // "vcenter" param present: make text box dynamic and center it vertically
-          gint x, y;
-          gimp_drawable_offsets(layer_ID, &x, &y);
-
-          // Fit text within bounds by reducing font size if needed
-          if (!fit_text_in_bounds(layer_ID, width, height, layer_data->text.value)) {
-            gimp_image_delete(new_image_ID);
-            return FALSE;
-          }
-
-          // Make text box dynamic (relative)
-          gimp_text_layer_set_box_mode(layer_ID, GIMP_TEXT_BOX_DYNAMIC);
-
-          // Ensure max width
-          gint text_h = gimp_drawable_height(layer_ID);
-          if (text_h > height) {
-            text_h = height
-          }
-
-          gimp_text_layer_resize(layer_ID, width, text_h);
-
-          // Center text within the original box
-          gint new_y = y + (height - text_h) / 2;
-          gimp_layer_set_offsets(layer_ID, x, new_y);
         }
-        new_layer_ID = layer_ID;
         break;
-      }
       case LAYER_TYPE_BOOL:
-        new_layer_ID = layer_ID;
+        gimp_item_set_visible(layer_ID, TRUE);
         break;
       default:
         gimp_image_delete(new_image_ID);
         printf("Invalid layer type. Something went wrong\n");
         return FALSE;
     }
-    gimp_item_set_visible(new_layer_ID, TRUE);
+
+    if (layer_data->rotate != 0.0) {
+      gdouble angle_rad = layer_data->rotate * G_PI / 180.0;
+      gimp_item_transform_rotate(layer_ID, angle_rad, TRUE, 0.0, 0.0);
+    }
   }
 
   gint32 final_layer = gimp_image_flatten(new_image_ID);
