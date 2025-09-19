@@ -105,50 +105,37 @@ static const gchar* str_from_layer_type(LayerType type) {
 
 typedef struct {
   LayerType type;
+  int vcenter;
   gdouble rotate;
-  union {
-    gchar* image_path;
-    struct text {
-      gchar* value;
-      int vcenter;
-    } text;
-  };
+} LayerConfig;
+
+typedef struct {
+  LayerConfig* config;
+  gchar* value;
 } LayerData;
 
-LayerData* new_layer_data_image(gchar* image_path, gdouble rotate) {
-  LayerData* ld = malloc(sizeof(LayerData));
-  ld->type = LAYER_TYPE_IMAGE;
-  ld->rotate = rotate;
-  ld->image_path = image_path;
-  return ld;
+LayerConfig* new_layer_config(LayerType type, int vcenter, gdouble rotate) {
+  LayerConfig* lc = malloc(sizeof(LayerConfig));
+  lc->type = type;
+  lc->vcenter = vcenter;
+  lc->rotate = rotate;
+  return lc;
 }
 
-LayerData* new_layer_data_text(gchar* value, int vcenter, gdouble rotate) {
-  LayerData* ld = malloc(sizeof(LayerData));
-  ld->type = LAYER_TYPE_TEXT;
-  ld->rotate = rotate;
-  ld->text.value = value;
-  ld->text.vcenter = vcenter;
-  return ld;
+void del_layer_config(LayerConfig* lc) {
+  if (lc) free(lc);
 }
 
-LayerData* new_layer_data_bool(gdouble rotate) {
+LayerData* new_layer_data(LayerConfig* config, gchar* value) {
   LayerData* ld = malloc(sizeof(LayerData));
-  ld->type = LAYER_TYPE_BOOL;
-  ld->rotate = rotate;
+  ld->config = config;
+  ld->value = value;
   return ld;
 }
 
 void del_layer_data(LayerData* ld) {
   if (!ld) return;
-  switch (ld->type) {
-    case LAYER_TYPE_IMAGE:
-      g_free(ld->image_path);
-      break;
-    case LAYER_TYPE_TEXT:
-      g_free(ld->text.value);
-      break;
-  }
+  g_free(ld->value);
   free(ld);
 }
 
@@ -225,111 +212,85 @@ static GPtrArray* new_ptr_array_from_json_array(JsonReader *reader, NewElementCa
 }
 
 static gpointer new_layer_from_json(JsonReader *reader, gchar* key, void* user_data) {
-  if (!json_reader_is_value(reader)) {
-    printf("Not a value under key %s\n", key);
-    return NULL;
-  }
-  LayerType type = layer_type_from_str(json_reader_get_string_value(reader));
-  if (type == LAYER_TYPE_UNKNOWN) {
-    printf("Layer type unknown: %s\n", json_reader_get_string_value(reader));
+  LayerType type = LAYER_TYPE_UNKNOWN;
+  int vcenter = 0;
+  gdouble rotate = 0.0;
+
+  if (json_reader_is_value(reader)) {
+    // Simple string format: "layer_name": "text"
+    type = layer_type_from_str(json_reader_get_string_value(reader));
+    if (type == LAYER_TYPE_UNKNOWN) {
+      printf("Layer type unknown: %s\n", json_reader_get_string_value(reader));
+      return NULL;
+    }
+  } else if (json_reader_is_object(reader)) {
+    // Object format: "layer_name": {"value": "text", "vcenter": 1, "rotate": 90}
+    if (json_reader_read_member(reader, "value")) {
+      if (!json_reader_is_value(reader)) {
+        printf("%s value is not a value\n", key);
+        json_reader_end_member(reader);
+        return NULL;
+      }
+      type = layer_type_from_str(json_reader_get_string_value(reader));
+      if (type == LAYER_TYPE_UNKNOWN) {
+        printf("Layer type unknown: %s\n", json_reader_get_string_value(reader));
+        json_reader_end_member(reader);
+        return NULL;
+      }
+    } else {
+      printf("value not a member of %s\n", key);
+      json_reader_end_member(reader);
+      return NULL;
+    }
+    json_reader_end_member(reader);
+
+    // Read vcenter if present
+    if (json_reader_read_member(reader, "vcenter")) {
+      if (json_reader_is_value(reader)) {
+        vcenter = json_reader_get_boolean_value(reader) ? 1 : json_reader_get_int_value(reader);
+      }
+    }
+    json_reader_end_member(reader);
+
+    // Read rotate if present  
+    if (json_reader_read_member(reader, "rotate")) {
+      if (json_reader_is_value(reader)) {
+        rotate = json_reader_get_double_value(reader);
+      }
+    }
+    json_reader_end_member(reader);
+  } else {
+    printf("Layer definition is neither a value nor an object for key %s\n", key);
     return NULL;
   }
 
-  LayerType* layer_type = g_new(LayerType, 1);
-  *layer_type = type;
-  return layer_type;
-}
-
-static gchar* read_value_member_from_json(JsonReader *reader, gchar* key) {
-  if (!json_reader_read_member(reader, "value")) {
-    printf("value not a member of %s\n", key);
-    json_reader_end_member(reader);
-    return NULL;
-  }
-  if (!json_reader_is_value(reader)) {
-    printf("%s value is not a value\n", key);
-    json_reader_end_member(reader);
-    return NULL;
-  }
-  const gchar* value = json_reader_get_string_value(reader);
-  gchar* value_dup = g_strdup(value);
-  json_reader_end_member(reader);
-  if (!value_dup) {
-    printf("Failed to duplicate text value for key %s\n", key);
-    return NULL;
-  }
-  return value_dup;
+  return new_layer_config(type, vcenter, rotate);
 }
 
 static gpointer new_layer_data_from_json(JsonReader *reader, gchar* key, void* user_data) {
-  gpointer value = g_hash_table_lookup((GHashTable*)user_data, key);
-  if (!value) {
-    printf("Layer data not found for key %s\n", key);
+  LayerConfig* layer_config = (LayerConfig*)g_hash_table_lookup((GHashTable*)user_data, key);
+  if (!layer_config) {
+    printf("Layer config not found for key %s\n", key);
     return NULL;
   }
 
-  gdouble rotate = 0.0;
-  if (json_reader_is_object(reader)) {
-    if (json_reader_read_member(reader, "rotate")) {
-      if (!json_reader_is_value(reader)) {
-        printf("%s rotate is not a value\n", key);
-        json_reader_end_member(reader);
-        return NULL;
-      }
-      rotate = json_reader_get_double_value(reader);
-    }
-    json_reader_end_member(reader);
-  }
+  // Use layer configuration for vcenter and rotate
+  int vcenter = layer_config->vcenter;
+  gdouble rotate = layer_config->rotate;
+  LayerType layer_type = layer_config->type;
 
-  LayerType layer_type = *((LayerType*)value);
   switch (layer_type) {
-    case LAYER_TYPE_IMAGE: {
-      if (json_reader_is_value(reader)) {
-        const gchar* data_value = json_reader_get_string_value(reader);
-        return new_layer_data_image(g_strdup(data_value), 0.0);
-      } else if (json_reader_is_object(reader)) {
-        gchar* value_str = read_value_member_from_json(reader, key);
-        if (!value_str) {
-          printf("Failed to read image value for key %s\n", key);
-          return NULL;
-        }
-        return new_layer_data_image(value_str, rotate);
-      } else {
+    case LAYER_TYPE_IMAGE:
+    case LAYER_TYPE_TEXT: {
+      if (!json_reader_is_value(reader)) {
         printf("Layer data is not a value for key %s\n", key);
         return NULL;
       }
+      const gchar* data_value = json_reader_get_string_value(reader);
+      return new_layer_data(layer_config, g_strdup(data_value));
     }
-    case LAYER_TYPE_TEXT: {
-      if (json_reader_is_value(reader)) {
-        const gchar* data_value = json_reader_get_string_value(reader);
-        return new_layer_data_text(g_strdup(data_value), 0, 0.0);
-      } else if (json_reader_is_object(reader)) {
-        int center = 0;
-        gchar* value_str = read_value_member_from_json(reader, key);
-        if (!value_str) {
-          printf("Failed to read text value for key %s\n", key);
-          return NULL;
-        }
-
-        if (json_reader_read_member(reader, "vcenter")) {
-          if (!json_reader_is_value(reader)) {
-            printf("%s vcenter is not a value\n", key);
-            json_reader_end_member(reader);
-            g_free(value_str);
-            return NULL;
-          }
-          /* accept boolean or int; convert to int */
-          center = json_reader_get_boolean_value(reader) ? 1 : json_reader_get_int_value(reader);
-        }
-        json_reader_end_member(reader);
-
-        return new_layer_data_text(value_str, center, rotate);
-      }
-
-      printf("Layer data is neither a value nor an object for key %s\n", key);
-      return NULL;
-    }
-    case LAYER_TYPE_BOOL: return new_layer_data_bool(rotate);
+    case LAYER_TYPE_BOOL: 
+      return new_layer_data(layer_config, NULL);
     default:
       printf("Invalid layer type for key %s\n", key);
       return NULL;
@@ -349,7 +310,7 @@ static gpointer new_xcf_from_json(JsonReader *reader, gchar* key, void* user_dat
     printf("layers not a member of %s\n", key);
     return NULL;
   }
-  GHashTable* layers = new_hashtable_from_json_object(reader, &new_layer_from_json, g_free, NULL);
+  GHashTable* layers = new_hashtable_from_json_object(reader, &new_layer_from_json, (GDestroyNotify)&del_layer_config, NULL);
   if (!layers) {
     printf("Failed to read layers from %s object\n", key);
     return NULL;
@@ -410,7 +371,7 @@ void print_layer_mismatch(gint32 layer_ID, const gchar* name, LayerType layer_ty
 }
 
 gint32 insert_image_layer(gint32 image_ID, gint32 layer_ID, LayerData* layer_data, gchar* assets_dir) {
-  gchar* asset_file = g_build_filename(assets_dir, layer_data->image_path, NULL);
+  gchar* asset_file = g_build_filename(assets_dir, layer_data->value, NULL);
   gint32 new_layer_ID = gimp_file_load_layer(GIMP_RUN_NONINTERACTIVE, image_ID, asset_file);
   if (new_layer_ID == -1) {
     printf("Unable to load %s as layer\n", asset_file);
@@ -450,7 +411,8 @@ static gboolean prepare_config_layers(gint32 image_ID, GHashTable* layers) {
       printf("Failed to find %s layer in image\n", (gchar*)key);
       return FALSE;
     }
-    LayerType layer_type = *((LayerType*)value);
+    LayerConfig* layer_config = (LayerConfig*)value;
+    LayerType layer_type = layer_config->type;
     if (!((layer_type == LAYER_TYPE_IMAGE && !gimp_item_is_text_layer(layer_ID))
         || (layer_type == LAYER_TYPE_TEXT && gimp_item_is_text_layer(layer_ID))
         || layer_type == LAYER_TYPE_BOOL)) {
@@ -856,8 +818,8 @@ static gboolean generate_component(int i, gint32 image_ID, GHashTable* component
     LayerData* layer_data = (LayerData*)value;
     gint32 layer_ID = gimp_image_get_layer_by_name(new_image_ID, key);
     gint32 new_layer_ID;
-    printf("Processing layer %s of type %s\n", layer_name, str_from_layer_type(layer_data->type));
-    switch (layer_data->type) {
+    printf("Processing layer %s of type %s\n", layer_name, str_from_layer_type(layer_data->config->type));
+    switch (layer_data->config->type) {
       case LAYER_TYPE_IMAGE:
         new_layer_ID = insert_image_layer(new_image_ID, layer_ID, layer_data, assets_dir);
         if (new_layer_ID == -1) {
@@ -868,8 +830,8 @@ static gboolean generate_component(int i, gint32 image_ID, GHashTable* component
         break;
       case LAYER_TYPE_TEXT:
         gimp_item_set_visible(layer_ID, TRUE);
-        if (!fit_text_in_layer(layer_ID, layer_data->text.value, layer_data->text.vcenter)) {
-            printf("Couldn't fit text in layer: %s\n", layer_data->text.value);
+        if (!fit_text_in_layer(layer_ID, layer_data->value, layer_data->config->vcenter)) {
+            printf("Couldn't fit text in layer: %s\n", layer_data->value);
             gimp_image_delete(new_image_ID);
             return FALSE;
         }
@@ -883,8 +845,8 @@ static gboolean generate_component(int i, gint32 image_ID, GHashTable* component
         return FALSE;
     }
 
-    if (layer_data->rotate != 0.0) {
-      gdouble angle_rad = layer_data->rotate * G_PI / 180.0;
+    if (layer_data->config->rotate != 0.0) {
+      gdouble angle_rad = layer_data->config->rotate * G_PI / 180.0;
       gimp_item_transform_rotate(layer_ID, angle_rad, TRUE, 0.0, 0.0);
     }
   }
