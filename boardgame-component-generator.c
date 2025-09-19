@@ -5,6 +5,9 @@
 #include <json-glib/json-glib.h>
 #include <json-glib/json-gobject.h>
 #include <math.h>
+#include <pango/pango.h>
+#include <pango/pangocairo.h>
+#include <cairo.h>
 
 #define PLUG_IN_PROC_NAME "boardgame-component-generator"
 #define PLUG_IN_BINARY "boardgame-component-generator-bin"
@@ -492,6 +495,89 @@ static gboolean fit_text_in_bounds(gint32 layer_ID, gint width, gint height, con
   return TRUE;
 }
 
+typedef struct {
+  gchar* layer_name;
+  gint32 duplicate_layer_id;
+  gint position_in_text;
+} ImageKeyword;
+
+static GPtrArray* find_image_keywords(const gchar* text, gint32 image_ID) {
+  GPtrArray* keywords = g_ptr_array_new_with_free_func(g_free);
+  
+  const gchar* current = text;
+  gint position = 0;
+  
+  while (*current) {
+    if (*current == '_' && *(current + 1) == '_') {
+      const gchar* start = current + 2;
+      const gchar* end = strstr(start, "__");
+      
+      if (end && end > start) {
+        gchar* layer_name = g_strndup(start, end - start);
+        gint32 found_layer = gimp_image_get_layer_by_name(image_ID, layer_name);
+        
+        if (found_layer != -1 && !gimp_item_is_text_layer(found_layer)) {
+          ImageKeyword* keyword = g_malloc(sizeof(ImageKeyword));
+          keyword->layer_name = layer_name;
+          keyword->duplicate_layer_id = -1;
+          keyword->position_in_text = position;
+          g_ptr_array_add(keywords, keyword);
+        } else {
+          g_free(layer_name);
+        }
+        
+        current = end + 2;
+        position = (end + 2) - text;
+      } else {
+        current++;
+        position++;
+      }
+    } else {
+      current++;
+      position++;
+    }
+  }
+  
+  return keywords;
+}
+
+static gchar* replace_keywords_with_spaces(const gchar* text, GPtrArray* keywords) {
+  GString* result = g_string_new("");
+  const gchar* current = text;
+  gint last_pos = 0;
+  
+  for (guint i = 0; i < keywords->len; i++) {
+    ImageKeyword* keyword = g_ptr_array_index(keywords, i);
+    
+    // Find the keyword position in text
+    gchar* keyword_pattern = g_strdup_printf("__%s__", keyword->layer_name);
+    const gchar* found = strstr(current + last_pos, keyword_pattern);
+    
+    if (found) {
+      // Append text before keyword
+      g_string_append_len(result, current + last_pos, found - (current + last_pos));
+      
+      // Update the position in processed text (where the spaces will be)
+      keyword->position_in_text = result->len;
+      
+      // Append two spaces instead of keyword
+      g_string_append(result, "  ");
+      
+      // Move past the keyword
+      last_pos = (found + strlen(keyword_pattern)) - current;
+      
+
+    }
+    
+    g_free(keyword_pattern);
+  }
+  
+  // Append remaining text
+  g_string_append(result, current + last_pos);
+  
+  return g_string_free(result, FALSE);
+}
+
 static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcenter) {
   if (!gimp_item_is_text_layer(layer_ID)) {
     printf("Layer is not a text layer\n");
@@ -507,6 +593,23 @@ static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcente
   gint text_width = gimp_drawable_width(layer_ID);
   gint text_height = gimp_drawable_height(layer_ID);
   
+  // Find and process image keywords
+  GPtrArray* keywords = find_image_keywords(text, original_image_ID);
+  gchar* processed_text = replace_keywords_with_spaces(text, keywords);
+  
+  // Create duplicates of image layers for each keyword
+  for (guint i = 0; i < keywords->len; i++) {
+    ImageKeyword* keyword = g_ptr_array_index(keywords, i);
+    gint32 source_layer = gimp_image_get_layer_by_name(original_image_ID, keyword->layer_name);
+    
+    if (source_layer != -1) {
+      keyword->duplicate_layer_id = gimp_layer_copy(source_layer);
+      gimp_image_insert_layer(original_image_ID, keyword->duplicate_layer_id, 
+                             gimp_item_get_parent(layer_ID), 0);
+      gimp_item_set_visible(keyword->duplicate_layer_id, TRUE);
+    }
+  }
+  
   GimpUnit font_unit;
   gdouble font_size = gimp_text_layer_get_font_size(layer_ID, &font_unit);
   gchar* font_name = gimp_text_layer_get_font(layer_ID);
@@ -517,11 +620,13 @@ static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcente
   gint32 temp_image_ID = gimp_image_new(text_width, text_height * 2, GIMP_RGB);
   
   // Create text layer that takes whole image size
-  gint32 temp_text_layer_ID = gimp_text_layer_new(temp_image_ID, text, font_name, font_size, font_unit);
+  gint32 temp_text_layer_ID = gimp_text_layer_new(temp_image_ID, processed_text, font_name, font_size, font_unit);
   if (temp_text_layer_ID == -1) {
     printf("Failed to create temporary text layer\n");
     gimp_image_delete(temp_image_ID);
     g_free(font_name);
+    g_free(processed_text);
+    g_ptr_array_free(keywords, TRUE);
     return FALSE;
   }
   
@@ -540,7 +645,7 @@ static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcente
   while (!text_fits && current_font_size >= 1.0) {
     // Set current font size
     gimp_text_layer_set_font_size(temp_text_layer_ID, current_font_size, font_unit);
-    gimp_text_layer_set_text(temp_text_layer_ID, text);
+    gimp_text_layer_set_text(temp_text_layer_ID, processed_text);
     
     // Create alpha selection to find text bounds
     gimp_image_select_item(temp_image_ID, GIMP_CHANNEL_OP_REPLACE, temp_text_layer_ID);
@@ -573,13 +678,15 @@ static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcente
   g_free(font_name);
   
   if (current_font_size < 1.0) {
-    printf("Could not fit text within bounds: %s\n", text);
+    printf("Could not fit text within bounds: %s\n", processed_text);
+    g_free(processed_text);
+    g_ptr_array_free(keywords, TRUE);
     return FALSE;
   }
 
   // Set the found font size to the original text layer
   gimp_text_layer_set_font_size(layer_ID, current_font_size, font_unit);
-  gimp_text_layer_set_text(layer_ID, text);
+  gimp_text_layer_set_text(layer_ID, processed_text);
 
   if (vcenter) {
     gint x, y;
@@ -588,6 +695,153 @@ static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcente
     gint new_y = y - y1 + height_space;
     gimp_layer_set_offsets(layer_ID, x, new_y);
   }
+  
+  // Position image layers at the locations of the spaces
+  if (keywords->len > 0) {
+    // Get font name again (the previous one was freed)
+    gchar* current_font_name = gimp_text_layer_get_font(layer_ID);
+    
+    // Get text layer positioning info
+    gint text_x, text_y;
+    gimp_drawable_offsets(layer_ID, &text_x, &text_y);
+    
+    // Create a reference text layer with same properties as the main text layer
+    gint32 ref_text_layer = gimp_text_layer_new(original_image_ID, processed_text, current_font_name, current_font_size, font_unit);
+    gimp_image_insert_layer(original_image_ID, ref_text_layer, -1, 0);
+    gimp_text_layer_set_color(ref_text_layer, &text_color);
+    
+    // Set same position and size as original text layer
+    gimp_layer_set_offsets(ref_text_layer, text_x, text_y);
+    gimp_text_layer_resize(ref_text_layer, gimp_drawable_width(layer_ID), gimp_drawable_height(layer_ID));
+    
+    // Text processing and analysis completed
+    
+
+    
+    // Calculate positions for each keyword by character-by-character measurement
+    for (guint i = 0; i < keywords->len; i++) {
+      ImageKeyword* keyword = g_ptr_array_index(keywords, i);
+      
+      if (keyword->duplicate_layer_id != -1) {
+        // Create a text layer with just the text up to the keyword position
+        gchar* text_up_to_keyword = g_strndup(processed_text, keyword->position_in_text+1); // +1 to include the space
+        gint32 measure_layer = gimp_text_layer_new(original_image_ID, text_up_to_keyword, current_font_name, current_font_size, font_unit);
+        gimp_image_insert_layer(original_image_ID, measure_layer, -1, 0);
+        
+        // Set same properties as the reference layer
+        gimp_layer_set_offsets(measure_layer, text_x, text_y);
+        
+        // Create a PangoLayout that matches the GIMP text layer properties
+        // and use pango_layout_get_cursor_pos for accurate positioning
+        
+        // Get text layer properties
+        gchar *font_name = gimp_text_layer_get_font(layer_ID);
+        if (!font_name) {
+            printf("Failed to get font name for positioning\n");
+            continue;
+        }
+        
+        GimpUnit unit;
+        gdouble font_size = gimp_text_layer_get_font_size(layer_ID, &unit);
+        // Convert font size to pixels using the actual unit
+        gdouble font_size_pixels = gimp_units_to_pixels(font_size, unit, 72.0); // Assuming 72 DPI
+        gdouble line_spacing = gimp_text_layer_get_line_spacing(layer_ID);
+        gdouble letter_spacing = gimp_text_layer_get_letter_spacing(layer_ID);
+        
+        // Create Cairo surface for PangoLayout (needed for proper text measurement)
+        cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+        cairo_t *cr = cairo_create(surface);
+        
+        // Create PangoLayout
+        PangoLayout *layout = pango_cairo_create_layout(cr);
+        
+        // Set font description
+        PangoFontDescription *font_desc = pango_font_description_from_string(font_name);
+        pango_font_description_set_absolute_size(font_desc, font_size_pixels * PANGO_SCALE);
+        pango_layout_set_font_description(layout, font_desc);
+        
+        // Set text content up to the keyword position
+        pango_layout_set_text(layout, text_up_to_keyword, -1);
+        
+        // Set layout properties to match GIMP text layer
+        if (line_spacing != 0.0) {
+            // Convert line spacing to Pango units and apply
+            pango_layout_set_spacing(layout, (int)(line_spacing * PANGO_SCALE));
+        }
+        
+        // Set width constraint if text layer has one
+        gint text_layer_width = gimp_drawable_width(layer_ID);
+        if (text_layer_width > 0) {
+            pango_layout_set_width(layout, text_layer_width * PANGO_SCALE);
+            pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+        }
+        
+        // Get cursor position at the end of text_up_to_keyword
+        // This gives us the exact position where the keyword replacement should be placed
+        gint cursor_index = strlen(text_up_to_keyword);
+        PangoRectangle strong_pos, weak_pos;
+        pango_layout_get_cursor_pos(layout, cursor_index, &strong_pos, &weak_pos);
+        
+        // Convert from Pango units to pixels
+        gint cursor_x = PANGO_PIXELS(strong_pos.x + strong_pos.width / 2);
+        gint cursor_y = PANGO_PIXELS(strong_pos.y + strong_pos.height / 2);
+        
+        // Calculate final image position
+        gint final_image_x = text_x + cursor_x;
+        gint final_image_y = text_y + cursor_y;
+        
+        // Position calculated using accurate Pango cursor positioning
+        
+        // Cleanup Pango and Cairo objects
+        pango_font_description_free(font_desc);
+        g_object_unref(layout);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        g_free(font_name);
+        
+        // Resize image to match font size (make it proportional to font size)
+        gint image_size = (gint)(current_font_size * 0.9); // 90% of font size for better fit
+        gint original_width = gimp_drawable_width(keyword->duplicate_layer_id);
+        gint original_height = gimp_drawable_height(keyword->duplicate_layer_id);
+        
+        // Maintain aspect ratio
+        gdouble aspect_ratio = (gdouble)original_width / original_height;
+        gint final_width, final_height;
+        
+        if (aspect_ratio > 1.0) {
+          // Wider than tall
+          final_width = image_size;
+          final_height = (gint)(image_size / aspect_ratio);
+        } else {
+          // Taller than wide or square
+          final_height = image_size;
+          final_width = (gint)(image_size * aspect_ratio);
+        }
+        
+        gimp_layer_scale(keyword->duplicate_layer_id, final_width, final_height, FALSE);
+        
+        // Set final position (center the image at calculated position)
+        gint final_x = final_image_x - final_width / 2;
+        gint final_y = final_image_y - final_height / 2;
+        
+        // Position calculated successfully
+        
+        gimp_layer_set_offsets(keyword->duplicate_layer_id, final_x, final_y);
+        
+        // Clean up
+        gimp_image_remove_layer(original_image_ID, measure_layer);
+        g_free(text_up_to_keyword);
+      }
+    }
+    
+    // Clean up reference layer
+    gimp_image_remove_layer(original_image_ID, ref_text_layer);
+    g_free(current_font_name);
+  }
+  
+  // Clean up
+  g_free(processed_text);
+  g_ptr_array_free(keywords, TRUE);
 
   return TRUE;
 }
