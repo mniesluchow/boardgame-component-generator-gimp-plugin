@@ -561,12 +561,28 @@ static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcente
   for (guint i = 0; i < keywords->len; i++) {
     ImageKeyword* keyword = g_ptr_array_index(keywords, i);
     gint32 source_layer = gimp_image_get_layer_by_name(original_image_ID, keyword->layer_name);
-    
     if (source_layer != -1) {
       keyword->duplicate_layer_id = gimp_layer_copy(source_layer);
       gimp_image_insert_layer(original_image_ID, keyword->duplicate_layer_id, 
                              gimp_item_get_parent(layer_ID), 0);
       gimp_item_set_visible(keyword->duplicate_layer_id, TRUE);
+    } else {
+      // Try to load asset image file if no layer is found
+      gchar* asset_file = g_build_filename("assets", keyword->layer_name, NULL);
+      gint32 asset_layer = gimp_file_load_layer(GIMP_RUN_NONINTERACTIVE, original_image_ID, asset_file);
+      if (asset_layer == -1) {
+        g_free(asset_file);
+        asset_file = g_build_filename("out", keyword->layer_name, NULL);
+        asset_layer = gimp_file_load_layer(GIMP_RUN_NONINTERACTIVE, original_image_ID, asset_file);
+      }
+      g_free(asset_file);
+      if (asset_layer != -1) {
+        keyword->duplicate_layer_id = asset_layer;
+        gimp_image_insert_layer(original_image_ID, asset_layer, gimp_item_get_parent(layer_ID), 0);
+        gimp_item_set_visible(asset_layer, TRUE);
+      } else {
+        keyword->duplicate_layer_id = -1;
+      }
     }
   }
   
