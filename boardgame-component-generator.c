@@ -142,12 +142,14 @@ void del_layer_data(LayerData* ld) {
 typedef struct {
   GHashTable* layers;
   GPtrArray* data;
+  gchar* out_key;
 } ComponentTemplate;
 
-ComponentTemplate* new_component_template(GHashTable* layers, GPtrArray* data) {
+ComponentTemplate* new_component_template(GHashTable* layers, GPtrArray* data, gchar* out_key) {
   ComponentTemplate *ct = malloc (sizeof (ComponentTemplate));
   ct->layers = layers;
   ct->data = data;
+  ct->out_key = out_key;
   return ct;
 }
 
@@ -155,6 +157,7 @@ void del_component_template(ComponentTemplate* ct) {
   if (!ct) return;
   g_hash_table_destroy(ct->layers);
   g_ptr_array_free(ct->data, TRUE);
+  if (ct->out_key) g_free(ct->out_key);
   free(ct);
 }
 
@@ -306,6 +309,15 @@ static gpointer new_xcf_from_json(JsonReader *reader, gchar* key, void* user_dat
     printf("Not an object under key %s\n", key);
     return NULL;
   }
+
+  gchar* out_key = NULL;
+  if (json_reader_read_member(reader, "out")) {
+    if (json_reader_is_value(reader)) {
+      out_key = g_strdup(json_reader_get_string_value(reader));
+    }
+  }
+  json_reader_end_member(reader);
+
   if (!json_reader_read_member(reader, "layers")) {
     printf("layers not a member of %s\n", key);
     return NULL;
@@ -313,6 +325,7 @@ static gpointer new_xcf_from_json(JsonReader *reader, gchar* key, void* user_dat
   GHashTable* layers = new_hashtable_from_json_object(reader, &new_layer_from_json, (GDestroyNotify)&del_layer_config, NULL);
   if (!layers) {
     printf("Failed to read layers from %s object\n", key);
+    if (out_key) g_free(out_key);
     return NULL;
   }
   json_reader_end_member(reader);
@@ -320,6 +333,7 @@ static gpointer new_xcf_from_json(JsonReader *reader, gchar* key, void* user_dat
   if (!json_reader_read_member(reader, "data")) {
     printf("data not a member of %s\n", key);
     g_hash_table_destroy(layers);
+    if (out_key) g_free(out_key);
     return NULL;
   }
 
@@ -327,12 +341,13 @@ static gpointer new_xcf_from_json(JsonReader *reader, gchar* key, void* user_dat
   if (!data) {
     printf("Failed to read data from %s object\n", key);
     g_hash_table_destroy(layers);
+    if (out_key) g_free(out_key);
     return NULL;
   }
 
   json_reader_end_member(reader);
 
-  return new_component_template(layers, data);
+  return new_component_template(layers, data, out_key);
 }
 
 GHashTable* new_xfcs_from_json(JsonReader *reader) {
@@ -808,7 +823,7 @@ static gboolean fit_text_in_layer(gint32 layer_ID, const gchar* text, int vcente
   return TRUE;
 }
 
-static gboolean generate_component(int i, gint32 image_ID, GHashTable* component_layers, gchar* assets_dir, gchar* out_dir) {
+static gboolean generate_component(int i, gint32 image_ID, GHashTable* component_layers, gchar* assets_dir, gchar* out_dir, gchar* out_key) {
   GHashTableIter iter;
   gpointer key, value;
   gint32 new_image_ID = gimp_image_duplicate(image_ID);
@@ -852,7 +867,22 @@ static gboolean generate_component(int i, gint32 image_ID, GHashTable* component
   }
 
   gint32 final_layer = gimp_image_flatten(new_image_ID);
-  gchar* filename = g_strdup_printf("%d.%s", i, OUT_EXTENSION);
+  gchar* filename = NULL;
+  if (out_key) {
+    LayerData* out_layer = (LayerData*)g_hash_table_lookup(component_layers, out_key);
+    if (out_layer && out_layer->value) {
+        filename = g_strdup_printf("%s.%s", out_layer->value, OUT_EXTENSION);
+    }
+  }
+  if (!filename) {
+    filename = g_strdup_printf("%d.%s", i, OUT_EXTENSION);
+  }
+  const size_t to_sanitize_len = strlen(filename)-strlen(OUT_EXTENSION)-1;
+  for (char* p = filename; p < filename + to_sanitize_len; ++p) {
+    if (!(g_ascii_isalnum(*p) || *p == '-' || *p == '_')) {
+      *p = '_';
+    }
+  }
   gchar* out_file = g_build_filename(out_dir, filename, NULL);
   gboolean ret = gimp_file_save(
       GIMP_RUN_NONINTERACTIVE,
@@ -869,15 +899,14 @@ static gboolean generate_component(int i, gint32 image_ID, GHashTable* component
   return ret;
 }
 
-static gboolean generate_components(gint32 image_ID, GPtrArray* components_layers, gchar* assets_dir, gchar* out_dir) {
+static gboolean generate_components(gint32 image_ID, GPtrArray* components_layers, gchar* assets_dir, gchar* out_dir, gchar* out_key) {
   int i;
   for (i = 0; i < components_layers->len; ++i) {
     GHashTable *component_layers = (GHashTable*)(g_ptr_array_index(components_layers, i));
-    if (!generate_component(i, image_ID, component_layers, assets_dir, out_dir)) {
+    if (!generate_component(i, image_ID, component_layers, assets_dir, out_dir, out_key)) {
       return FALSE;
     }
   }
-
   return TRUE;
 }
 
@@ -946,7 +975,7 @@ static gboolean generate_from_xfc(gchar* xcfs_dir, gchar* assets_dir, gchar* out
     return FALSE;
   }
 
-  gboolean ret = generate_components(image_ID, ct->data, assets_dir, components_out_dir);
+  gboolean ret = generate_components(image_ID, ct->data, assets_dir, components_out_dir, ct->out_key);
 
   g_free(components_out_dir);
   gimp_image_delete(image_ID);
