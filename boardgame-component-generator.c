@@ -480,19 +480,15 @@ typedef struct {
 
 static GPtrArray* find_image_keywords(const gchar* text, gint32 image_ID) {
   GPtrArray* keywords = g_ptr_array_new_with_free_func(g_free);
-  
   const gchar* current = text;
   gint position = 0;
-  
   while (*current) {
-    if (*current == '_' && *(current + 1) == '_') {
+    if (*current == '<' && *(current + 1) == '<') {
       const gchar* start = current + 2;
-      const gchar* end = strstr(start, "__");
-      
+      const gchar* end = strstr(start, ">>");
       if (end && end > start) {
         gchar* layer_name = g_strndup(start, end - start);
         gint32 found_layer = gimp_image_get_layer_by_name(image_ID, layer_name);
-        
         if (found_layer != -1 && !gimp_item_is_text_layer(found_layer)) {
           ImageKeyword* keyword = g_malloc(sizeof(ImageKeyword));
           keyword->layer_name = layer_name;
@@ -502,7 +498,6 @@ static GPtrArray* find_image_keywords(const gchar* text, gint32 image_ID) {
         } else {
           g_free(layer_name);
         }
-        
         current = end + 2;
         position = (end + 2) - text;
       } else {
@@ -514,7 +509,6 @@ static GPtrArray* find_image_keywords(const gchar* text, gint32 image_ID) {
       position++;
     }
   }
-  
   return keywords;
 }
 
@@ -522,36 +516,25 @@ static gchar* replace_keywords_with_spaces(const gchar* text, GPtrArray* keyword
   GString* result = g_string_new("");
   const gchar* current = text;
   gint last_pos = 0;
-  
   for (guint i = 0; i < keywords->len; i++) {
     ImageKeyword* keyword = g_ptr_array_index(keywords, i);
-    
     // Find the keyword position in text
-    gchar* keyword_pattern = g_strdup_printf("__%s__", keyword->layer_name);
+    gchar* keyword_pattern = g_strdup_printf("<<%s>>", keyword->layer_name);
     const gchar* found = strstr(current + last_pos, keyword_pattern);
-    
     if (found) {
       // Append text before keyword
       g_string_append_len(result, current + last_pos, found - (current + last_pos));
-      
       // Update the position in processed text (where the spaces will be)
       keyword->position_in_text = result->len;
-      
       // Append two spaces instead of keyword
       g_string_append(result, "  ");
-      
       // Move past the keyword
       last_pos = (found + strlen(keyword_pattern)) - current;
-      
-
     }
-    
     g_free(keyword_pattern);
   }
-  
   // Append remaining text
   g_string_append(result, current + last_pos);
-  
   return g_string_free(result, FALSE);
 }
 
