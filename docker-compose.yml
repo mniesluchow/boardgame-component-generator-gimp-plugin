@@ -1,0 +1,23 @@
+services:
+  gimp-boardgame-component-generator:
+    build: .
+    container_name: gimp-boardgame-component-generator
+    environment:
+      - PUID=${UID}
+      - PGID=${GID}
+      - TZ=${TZ}
+      - DOCKER_MODS=linuxserver/mods:universal-package-install
+      - INSTALL_PACKAGES=gimp-dev
+    volumes:
+      - ${HOST_PROJECT_DIR}:/project_dir
+    ports:
+      - 3000:3000
+      - 3001:3001
+    shm_size: "1gb"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import gi, sys; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk; sys.exit(not Gtk.init_check())"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 60s

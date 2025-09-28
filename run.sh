@@ -10,13 +10,21 @@ SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 
 if [ $# -lt 1 ] ; then
   echo "Usage: ./run.sh /path/to/project/dir"
+  exit 1
 fi
 
-if ! command -v gimptool-2.0 >/dev/null 2>&1 ; then
-  echo "Installing gimptool-2.0"
-  sudo apt install -y libgimp2.0-dev
+GIMP_MAJOR_VERSION="$(gimp --version | awk '{print $NF}' | cut -d. -f1)"
+GIMPTOOL_BIN="gimptool-$GIMP_MAJOR_VERSION.0"
+
+if ! command -v $GIMPTOOL_BIN >/dev/null 2>&1 ; then
+  echo "Installing $GIMPTOOL_BIN"
+  sudo apt install -y libgimp$GIMP_MAJOR_VERSION.0-dev
 fi
 
-gimptool-2.0 --install "$SCRIPT_DIR/boardgame-component-generator.c"
-gimp -i -b "(boardgame-component-generator RUN-NONINTERACTIVE 0 0 \"$1\")" -b '(gimp-quit 0)'
-gimptool-2.0 --uninstall-bin boardgame-component-generator
+$GIMPTOOL_BIN --install "$SCRIPT_DIR/boardgame-component-generator.c"
+if [ $GIMP_MAJOR_VERSION -lt 3 ] ; then
+  gimp -i -b "(boardgame-component-generator RUN-NONINTERACTIVE \"$1\")" -b '(gimp-quit 0)'
+else
+  gimp --batch-interpreter=plug-in-script-fu-eval -i -b "(boardgame-component-generator #:run_mode 1 #:project-dir \"$1\")" -b '(gimp-quit 0)'
+fi
+$GIMPTOOL_BIN --uninstall-bin boardgame-component-generator
